@@ -8,8 +8,10 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.Registry;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.Identifier;
+import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.util.RandomSource;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
@@ -22,6 +24,8 @@ import net.minecraft.world.level.block.state.properties.EnumProperty;
 import net.minecraft.world.level.block.state.properties.IntegerProperty;
 import net.minecraft.world.level.block.state.properties.Property;
 import net.minecraft.world.level.storage.loot.LootParams;
+import net.minecraft.world.level.storage.loot.LootTable;
+import net.minecraft.world.level.storage.loot.parameters.LootContextParamSets;
 import net.minecraft.world.level.storage.loot.parameters.LootContextParams;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.phys.shapes.VoxelShape;
@@ -30,7 +34,10 @@ import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Optional;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 public class BlocksDataGenerator implements IDataGenerator {
@@ -43,16 +50,51 @@ public class BlocksDataGenerator implements IDataGenerator {
                 .collect(Collectors.toList());
     }
 
+    // A loot table roll is one random sample, and blockState.getDrops() takes its
+    // randomness from the level, so chance-based drops (saplings, seeds, sticks)
+    // were listed or not depending on the run. Instead, every drop the table can
+    // produce is collected over a fixed set of seeded samples. 2048 catch drops
+    // as rare as the 0.5% apple from oak leaves. This is BlockBehaviour.getDrops()
+    // with a seed; the blocks that override it (beehive, decorated pot, shulker
+    // box) only add data to the stack, and liquids have no loot table.
+    //
+    // The seeds come from one seeded stream rather than counting up: a legacy
+    // random source started from 1, 2, 3... returns almost the same first float
+    // every time, so a 5% sapling roll never lands. And never 0, which loot
+    // contexts read as "no seed" and replace with the level's random source.
+    private static final int DROP_SAMPLES = 2048;
+    private static final long DROP_SEED = 0x6d696e6563726166L;
+
     private static void populateDropsIfPossible(BlockState blockState, Item firstToolItem, List<ItemStack> outDrops) {
         MinecraftServer minecraftServer = DGU.getCurrentlyRunningServer();
         if (minecraftServer != null) {
             //If we have local world context, we can actually evaluate loot tables and determine actual data
             ServerLevel serverWorld = minecraftServer.overworld();
-            LootParams.Builder lootContextParameterSet = new LootParams.Builder(serverWorld)
+            Optional<ResourceKey<LootTable>> lootTableKey = blockState.getBlock().getLootTable();
+            if (lootTableKey.isEmpty()) {
+                return;
+            }
+            LootParams lootParams = new LootParams.Builder(serverWorld)
                     .withParameter(LootContextParams.BLOCK_STATE, blockState)
                     .withParameter(LootContextParams.ORIGIN, Vec3.ZERO)
-                    .withParameter(LootContextParams.TOOL, firstToolItem.getDefaultInstance());
-            outDrops.addAll(blockState.getDrops(lootContextParameterSet));
+                    .withParameter(LootContextParams.TOOL, firstToolItem.getDefaultInstance())
+                    .create(LootContextParamSets.BLOCK);
+            LootTable lootTable = minecraftServer.reloadableRegistries().getLootTable(lootTableKey.get());
+            Set<Item> seen = new HashSet<>();
+            RandomSource seeds = RandomSource.create(DROP_SEED);
+            for (int sample = 0; sample < DROP_SAMPLES; sample++) {
+                long seed = seeds.nextLong();
+                if (seed == 0L) {
+                    continue;
+                }
+                for (ItemStack drop : lootTable.getRandomItems(lootParams, seed)) {
+                    // A roll of zero (dead bush sticks: 0-2) is an empty stack,
+                    // which reads back as air.
+                    if (!drop.isEmpty() && seen.add(drop.getItem())) {
+                        outDrops.add(drop);
+                    }
+                }
+            }
         } else {
             //If we're lacking world context to correctly determine drops, assume that default drop is ItemBlock stack in quantity of 1
             Item itemBlock = blockState.getBlock().asItem();
