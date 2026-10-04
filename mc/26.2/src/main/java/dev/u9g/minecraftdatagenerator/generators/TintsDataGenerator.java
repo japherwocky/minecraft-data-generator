@@ -11,21 +11,28 @@ import net.minecraft.core.RegistryAccess;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.Identifier;
 import net.minecraft.world.level.FoliageColor;
+import net.minecraft.world.level.GrassColor;
 import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.RedStoneWireBlock;
 
+import javax.imageio.ImageIO;
+import java.awt.image.BufferedImage;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.UncheckedIOException;
 import java.util.*;
 
 public class TintsDataGenerator implements IDataGenerator {
     public static BiomeTintColors generateBiomeTintColors(Registry<Biome> biomeRegistry) {
         BiomeTintColors colors = new BiomeTintColors();
 
+        loadColormaps();
         biomeRegistry.forEach(biome -> {
-            int biomeGrassColor = biome.getGrassColor(0.0, 0.0);
-            int biomeFoliageColor = biome.getFoliageColor();
-            int biomeWaterColor = biome.getWaterColor();
+            int biomeGrassColor = rgb(biome.getGrassColor(0.0, 0.0));
+            int biomeFoliageColor = rgb(biome.getFoliageColor());
+            int biomeWaterColor = rgb(biome.getWaterColor());
 
             colors.grassColoursMap.computeIfAbsent(biomeGrassColor, k -> new ArrayList<>()).add(biome);
             colors.foliageColoursMap.computeIfAbsent(biomeFoliageColor, k -> new ArrayList<>()).add(biome);
@@ -52,6 +59,36 @@ public class TintsDataGenerator implements IDataGenerator {
         return ((int)(r * 255) << 16) | ((int)(g * 255) << 8) | (int)(b * 255);
     }
 
+    // Since 1.21.11 biome and block colours come back as ARGB with a full alpha
+    // byte, so they were written as negative numbers -- every water colour among
+    // them. tints.json has always held plain RGB, as the redstone colours still do.
+    private static int rgb(int argb) {
+        return argb & 0xFFFFFF;
+    }
+
+    // A biome that does not override its grass or foliage colour takes it from a
+    // colormap texture, and only the client loads those (GrassColorReloadListener,
+    // FoliageColorReloadListener). On the dedicated server this runs on, the pixel
+    // arrays are empty, so since 1.19.4 every such biome read as 0. The textures
+    // are on the classpath here, so load them the same way.
+    private static void loadColormaps() {
+        GrassColor.init(readColormap("grass"));
+        FoliageColor.init(readColormap("foliage"));
+    }
+
+    private static int[] readColormap(String name) {
+        String path = "/assets/minecraft/textures/colormap/" + name + ".png";
+        try (InputStream in = GrassColor.class.getResourceAsStream(path)) {
+            if (in == null) {
+                throw new IllegalStateException("No colormap on the classpath at " + path);
+            }
+            BufferedImage image = ImageIO.read(in);
+            return image.getRGB(0, 0, image.getWidth(), image.getHeight(), null, 0, image.getWidth());
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
     private static int getBlockColor(Block block) {
         return BlockColors.createDefault().getTintSource(block.defaultBlockState(), 0).colorInWorld(block.defaultBlockState(), EmptyRenderBlockView.INSTANCE, BlockPos.ZERO);
     }
@@ -59,16 +96,16 @@ public class TintsDataGenerator implements IDataGenerator {
     public static Map<Block, Integer> generateConstantTintColors() {
         Map<Block, Integer> resultColors = new LinkedHashMap<>();
 
-        resultColors.put(Blocks.BIRCH_LEAVES, FoliageColor.FOLIAGE_BIRCH);
-        resultColors.put(Blocks.SPRUCE_LEAVES, FoliageColor.FOLIAGE_EVERGREEN);
+        resultColors.put(Blocks.BIRCH_LEAVES, rgb(FoliageColor.FOLIAGE_BIRCH));
+        resultColors.put(Blocks.SPRUCE_LEAVES, rgb(FoliageColor.FOLIAGE_EVERGREEN));
 
-        resultColors.put(Blocks.LILY_PAD, getBlockColor(Blocks.LILY_PAD));
-        resultColors.put(Blocks.ATTACHED_MELON_STEM, getBlockColor(Blocks.ATTACHED_MELON_STEM));
-        resultColors.put(Blocks.ATTACHED_PUMPKIN_STEM, getBlockColor(Blocks.ATTACHED_PUMPKIN_STEM));
+        resultColors.put(Blocks.LILY_PAD, rgb(getBlockColor(Blocks.LILY_PAD)));
+        resultColors.put(Blocks.ATTACHED_MELON_STEM, rgb(getBlockColor(Blocks.ATTACHED_MELON_STEM)));
+        resultColors.put(Blocks.ATTACHED_PUMPKIN_STEM, rgb(getBlockColor(Blocks.ATTACHED_PUMPKIN_STEM)));
 
         //not really constant, depend on the block age, but kinda have to be handled since textures are literally white without them
-        resultColors.put(Blocks.MELON_STEM, getBlockColor(Blocks.MELON_STEM));
-        resultColors.put(Blocks.PUMPKIN_STEM, getBlockColor(Blocks.PUMPKIN_STEM));
+        resultColors.put(Blocks.MELON_STEM, rgb(getBlockColor(Blocks.MELON_STEM)));
+        resultColors.put(Blocks.PUMPKIN_STEM, rgb(getBlockColor(Blocks.PUMPKIN_STEM)));
 
         return resultColors;
     }
